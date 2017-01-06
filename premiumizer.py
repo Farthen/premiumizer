@@ -31,7 +31,7 @@ from flask_login import LoginManager, login_required, login_user, logout_user, U
 from flask_reverse_proxy import FlaskReverseProxied
 from flask_socketio import SocketIO, emit
 from gevent import local
-from pycurl_streamdl import StreamDL
+from pystreamdl import StreamDL
 from watchdog import events
 from watchdog.observers import Observer
 from werkzeug.utils import secure_filename
