@@ -31,10 +31,11 @@ from flask_login import LoginManager, login_required, login_user, logout_user, U
 from flask_reverse_proxy import FlaskReverseProxied
 from flask_socketio import SocketIO, emit
 from gevent import local
-from pySmartDL import SmartDL, utils
+from pycurl_streamdl import StreamDL
 from watchdog import events
 from watchdog.observers import Observer
 from werkzeug.utils import secure_filename
+import smartdl_utils as utils
 
 from DownloadTask import DownloadTask
 
@@ -59,6 +60,7 @@ active_interval = prem_config.getint('global', 'active_interval')
 idle_interval = prem_config.getint('global', 'idle_interval')
 debug_enabled = prem_config.getboolean('global', 'debug_enabled')
 
+debug_enabled = True
 # Initialize logging
 syslog = logging.StreamHandler()
 if debug_enabled:
@@ -644,10 +646,11 @@ def get_download_stats_jd(jd, package_name):
 
 def get_download_stats(downloader, total_size_downloaded):
     logger.debug('def get_download_stats started')
-    if downloader.get_status() == 'downloading':
-        size_downloaded = total_size_downloaded + downloader.get_dl_size()
+    if downloader.is_running():
+        status = downloader.status()
+        size_downloaded = total_size_downloaded + status.size
         progress = round(float(size_downloaded) * 100 / greenlet.task.size, 1)
-        speed = downloader.get_speed(human=False)
+        speed = status.speed
         if speed == 0:
             eta = ' '
         else:
@@ -657,10 +660,10 @@ def get_download_stats(downloader, total_size_downloaded):
                              dlsize=utils.sizeof_human(size_downloaded) + ' / ' + utils.sizeof_human(
                                  greenlet.task.size) + ' --- ', progress=progress, eta=eta)
 
-    elif downloader.get_status() == 'combining':
-        greenlet.task.update(speed=' ', eta=' Combining files')
-    elif downloader.get_status() == 'paused':
-        greenlet.task.update(speed=' ', eta=' Download paused')
+    #elif downloader.get_status() == 'combining':
+    #    greenlet.task.update(speed=' ', eta=' Combining files')
+    #elif downloader.get_status() == 'paused':
+    #    greenlet.task.update(speed=' ', eta=' Download paused')
     else:
         logger.debug('Want to update stats, but downloader status is invalid.')
 
@@ -694,46 +697,41 @@ def download_file():
     for download in greenlet.download_list:
         logger.debug('Downloading file: %s', download['path'])
         filename = os.path.basename(download['path'])
-        if not os.path.isfile(download['path']) or not os.path.isfile(os.path.join(greenlet.task.dldir, filename)):
-            files_downloaded = 1
-            if cfg.download_builtin:
-                downloader = SmartDL(download['url'], download['path'], progress_bar=False, logger=logger,
-                                     threads_count=1)
-                downloader.start(blocking=False)
-                if cfg.download_speed > 0:
-                    downloader.limit_speed(kbytes=cfg.download_speed)
-                while not downloader.isFinished():
-                    get_download_stats(downloader, total_size_downloaded)
-                    gevent_sleep_time()
-                    # if greenlet.task.local_status == "paused":            #   When paused to long
-                    #   downloader.pause()                                  #   PysmartDl fails with WARNING :
-                    #   while greenlet.task.local_status == "paused":       #   Diff between downloaded files and expected
-                    #       gevent_sleep_time()                               #   filesizes is .... Retrying...
-                    #   downloader.unpause()
-                    if greenlet.task.local_status == "stopped":
-                        while not downloader.isFinished():  # Have to use while loop
-                            downloader.stop()  # does not stop when called once ..
-                            gevent.sleep(0.5)  # let's hammer the stop call..
-                        return 1
-                if downloader.isSuccessful():
-                    dltime += downloader.get_dl_time()
-                    total_size_downloaded += downloader.get_dl_size()
-                    logger.debug('Finished downloading file: %s', download['path'])
-                    greenlet.task.update(dltime=dltime)
-                else:
-                    logger.error('Error for %s: while downloading file: %s', greenlet.task.name, download['path'])
-                    for e in downloader.get_errors():
-                        logger.error(str(greenlet.task.name + ": " + e))
-                    returncode = 1
-            elif cfg.jd_connected:
-                url = str(download['url'])
-                if len(query_links):
-                    if any(link['name'] == filename for link in query_links):
-                        continue
-                jd.linkgrabber.add_links([{"autostart": True, "links": url, "packageName": package_name,
-                                           "destinationFolder": greenlet.task.dldir, "overwritePackagizerRules": True}])
-        else:
-            logger.info('File not downloaded it already exists at: %s', download['path'])
+        #if not os.path.isfile(download['path']) or not os.path.isfile(os.path.join(greenlet.task.dldir, filename)):
+        files_downloaded = 1
+        if cfg.download_builtin:
+            downloader = StreamDL(download['url'], download['path'], throttle_bytes_sec=-1)
+            #downloader = SmartDL(download['url'], download['path'], progress_bar=False, logger=logger,
+            #                     threads_count=1)
+            downloader.start()
+            if cfg.download_speed > 0:
+                downloader.limit_speed(kbytes=cfg.download_speed)
+            
+            while not downloader.is_finished():
+                get_download_stats(downloader, total_size_downloaded)
+                gevent_sleep_time()
+                if greenlet.task.local_status == "stopped":
+                    downloader.stop_blocking()  # does not stop when called once ..
+
+            if downloader.is_successful():
+                dltime += downloader.get_dl_time()
+                total_size_downloaded += downloader.get_dl_size()
+                logger.debug('Finished downloading file: %s', download['path'])
+                greenlet.task.update(dltime=dltime)
+            else:
+                logger.error('Error for %s: while downloading file: %s', greenlet.task.name, download['path'])
+                for e in downloader.get_errors():
+                    logger.error(str(greenlet.task.name + ": " + e))
+                returncode = 1
+        elif cfg.jd_connected:
+            url = str(download['url'])
+            if len(query_links):
+                if any(link['name'] == filename for link in query_links):
+                    continue
+            jd.linkgrabber.add_links([{"autostart": True, "links": url, "packageName": package_name,
+                                       "destinationFolder": greenlet.task.dldir, "overwritePackagizerRules": True}])
+        #else:
+        #    logger.info('File not downloaded it already exists at: %s', download['path'])
 
     if cfg.jd_enabled and files_downloaded:
         if cfg.jd_connected:
